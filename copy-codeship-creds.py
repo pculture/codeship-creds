@@ -49,15 +49,15 @@ def login():
                    auth=HTTPBasicAuth(username, password))
     return data['access_token']
 
-def get_aes_keys(access_token, args):
+def get_aes_keys(access_token, source, dest):
     data = request('GET', '/organizations/{}/projects?per_page=50'.format(PCULTURE_UUID),
                    access_token)
     key_map = {
         repo_name_from_url(data['repository_url']): data['aes_key']
         for data in data['projects']
     }
-    source_key = key_map[repo_name_from_path(args.source)]
-    dest_key = key_map[repo_name_from_path(args.dest)]
+    source_key = key_map[repo_name_from_path(source)]
+    dest_key = key_map[repo_name_from_path(dest)]
     return source_key, dest_key
 
 def repo_name_from_url(url):
@@ -103,11 +103,18 @@ def parse_args():
 
 def main():
     args = parse_args()
+    source = os.path.abspath(args.source)
+    dest = os.path.abspath(args.dest)
+    if os.path.isdir(dest):
+        dest = os.path.join(dest, os.path.basename(source))
+
     access_token = login()
 
-    source_key, dest_key = get_aes_keys(access_token, args)
-    secret_data = decrypt(args.source, source_key)
-    encrypt(args.dest, dest_key, secret_data)
+    source_key, dest_key = get_aes_keys(access_token, source, dest)
+    secret_data = decrypt(source, source_key)
+    encrypt(dest, dest_key, secret_data)
+    print('credentials copied from {} to {}'.format(
+        source, dest))
 
 if __name__ == '__main__':
     main()
