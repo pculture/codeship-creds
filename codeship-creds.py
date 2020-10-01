@@ -3,6 +3,7 @@
 from getpass import getpass
 import argparse
 import contextlib
+import logging
 import os
 import re
 import subprocess
@@ -55,17 +56,6 @@ def login():
                    auth=HTTPBasicAuth(username, password))
     return data['access_token']
 
-def get_aes_keys(access_token, source, dest):
-    data = request('GET', '/organizations/{}/projects?per_page=50'.format(PCULTURE_UUID),
-                   access_token)
-    key_map = {
-        repo_name_from_url(data['repository_url']): data['aes_key']
-        for data in data['projects']
-    }
-    source_key = key_map[repo_name_from_path(source)]
-    dest_key = key_map[repo_name_from_path(dest)]
-    return source_key, dest_key
-
 def repo_name_from_url(url):
     for regex in REPO_PATTERNS:
         m = regex.match(url)
@@ -106,47 +96,51 @@ def jet_data_file(data):
         f.flush()
         yield f.name
 
-def decrypt(path, key):
-    with jet_data_file(key) as keyfile:
-        cmdline = [
-            'jet', 'decrypt', path, '/dev/stdout', '--key-path', keyfile,
-        ]
-        result = subprocess.run(cmdline, stdout=subprocess.PIPE,
-                                encoding='utf8')
-        return result.stdout
+class CodeshipCryto:
+    def __init__(self):
+        access_token = login()
 
-def encrypt(path, key, data):
-    with jet_data_file(key) as keyfile:
-        with jet_data_file(data) as datafile:
+        logging.debug('fetching AES keys')
+        data = request('GET', '/organizations/{}/projects?per_page=50'.format(PCULTURE_UUID),
+                       access_token)
+        self.aes_key_map = {
+            repo_name_from_url(data['repository_url']): data['aes_key']
+            for data in data['projects']
+        }
+
+    def get_key(self, path):
+        return self.aes_key_map[repo_name_from_path(path)]
+
+    def decrypt(self, path):
+        key = self.get_key(path)
+        with jet_data_file(key) as keyfile:
             cmdline = [
-                'jet', 'encrypt', datafile, path, '--key-path', keyfile,
+                'jet', 'decrypt', path, '/dev/stdout', '--key-path', keyfile,
             ]
-            subprocess.run(cmdline)
+            result = subprocess.run(cmdline, stdout=subprocess.PIPE,
+                                    encoding='utf8')
+            return result.stdout
+
+    def encrypt(self, path, data):
+        key = self.get_key(path)
+        with jet_data_file(key) as keyfile:
+            with jet_data_file(data) as datafile:
+                cmdline = [
+                    'jet', 'encrypt', datafile, path, '--key-path', keyfile,
+                ]
+                subprocess.run(cmdline)
 
 # Create a class for each subcommand
 class Subcommand:
-    ENABLE_VERBOSE = True
-
-    def __init__(self):
-        self.verbose = False
-
     def name(self):
         return self.__class__.__name__.lower()
 
     def add_to_subparsers(self, subparsers):
         parser = subparsers.add_parser(self.name())
         parser.set_defaults(subcommand=self)
-        if self.ENABLE_VERBOSE:
-            parser.add_argument('-v', '--verbose', action='store_true')
+        # Verbose is standard for all commands
+        parser.add_argument('-v', '--verbose', action='store_true')
         self.add_arguments(parser)
-
-    def setup(self, args):
-        if self.ENABLE_VERBOSE and args.verbose:
-            self.verbose = True
-
-    def debug_log(self, text):
-        if self.verbose:
-            print(text)
 
     def add_arguments(self, parser):
         raise NotImplementedError()
@@ -165,16 +159,31 @@ class Copy(Subcommand):
         if os.path.isdir(dest):
             dest = os.path.join(dest, os.path.basename(source))
 
-        access_token = login()
-
-        self.debug_log('getting AES key')
-        source_key, dest_key = get_aes_keys(access_token, source, dest)
-        self.debug_log(f'decrypting credentials from {source}')
-        secret_data = decrypt(source, source_key)
-        self.debug_log(f'encrypting credentials to {dest}')
-        encrypt(dest, dest_key, secret_data)
-        print('credentials copied from {} to {}'.format(
+        crypto = CodeshipCryto()
+        logging.debug(f'decrypting credentials from {source}')
+        secret_data = crypto.decrypt(source)
+        logging.debug(f'encrypting credentials to {dest}')
+        crypto.encrypt(dest, secret_data)
+        logging.info('credentials copied from {} to {}'.format(
             source, dest))
+
+class Print(Subcommand):
+    def add_arguments(self, parser):
+        parser.add_argument('path', help='encrypted creds path')
+        parser.add_argument('-n', '--name_only', action='store_true')
+
+    def run(self, args):
+        source = os.path.abspath(args.path)
+
+        crypto = CodeshipCryto()
+        logging.debug(f'decrypting credentials from {source}')
+        secret_data = crypto.decrypt(source)
+        if args.name_only:
+            secret_data = '\n'.join(
+                line.split('=')[0] for line in secret_data.split('\n')
+            )
+        print()
+        print(secret_data)
 
 def create_parser():
     parser = argparse.ArgumentParser()
@@ -184,11 +193,23 @@ def create_parser():
         subcommand.add_to_subparsers(subparsers)
     return parser
 
+def setup_logging(args):
+    if args.verbose:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+    logging.basicConfig(
+        level=level,
+        format='{levelname} {message}',
+        style='{')
+    # squash debugging from urllib
+    logging.getLogger('urllib3').setLevel(logging.INFO)
+
 def main():
     parser = create_parser()
     args = parser.parse_args()
     if hasattr(args, 'subcommand'):
-        args.subcommand.setup(args)
+        setup_logging(args)
         args.subcommand.run(args)
     else:
         parser.print_help()
