@@ -169,21 +169,33 @@ class Copy(Subcommand):
 
 class Print(Subcommand):
     def add_arguments(self, parser):
-        parser.add_argument('path', help='encrypted creds path')
+        parser.add_argument('path', help='encrypted creds path', nargs='+')
         parser.add_argument('-n', '--name_only', action='store_true')
 
     def run(self, args):
-        source = os.path.abspath(args.path)
-
         crypto = CodeshipCryto()
-        logging.debug(f'decrypting credentials from {source}')
-        secret_data = crypto.decrypt(source)
-        if args.name_only:
-            secret_data = '\n'.join(
-                line.split('=')[0] for line in secret_data.split('\n')
-            )
-        print()
-        print(secret_data)
+        all_secret_data = []
+        for source in args.path:
+            source = os.path.abspath(source)
+            logging.debug(f'decrypting credentials from {source}')
+            secret_data = crypto.decrypt(source)
+            if args.name_only:
+                secret_data = '\n'.join(
+                    line.split('=')[0] for line in secret_data.split('\n')
+                )
+            all_secret_data.append(secret_data)
+
+
+        if len(all_secret_data) == 1:
+            # 1 file, just print the secrets
+            print()
+            print(secret_data)
+        else:
+            # Multiple files, print the filename, then secrets
+            for (source, secret_data) in zip(args.path, all_secret_data):
+                print()
+                print(source)
+                print(secret_data)
 
 def create_parser():
     parser = argparse.ArgumentParser()
